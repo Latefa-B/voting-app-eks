@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: result
+  namespace: vote
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: result }
+  template:
+    metadata:
+      labels: { app: result }
+    spec:
+      containers:
+        - name: result
+          image: 694862618269.dkr.ecr.us-east-1.amazonaws.com/voting-app/result:latest
+          ports: [{ containerPort: 4000 }]
+          resources:
+            requests: { memory: "64Mi", cpu: "50m" }
+            limits: { memory: "128Mi", cpu: "100m" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: result
+  namespace: vote
+spec:
+  selector: { app: result }
+  ports: [{ port: 4000, targetPort: 4000 }]
+  type: ClusterIP

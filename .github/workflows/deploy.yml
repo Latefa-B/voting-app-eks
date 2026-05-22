@@ -1,0 +1,121 @@
+name: Build and Deploy Voting App
+
+on:
+  push: { branches: [main] }
+  workflow_dispatch:
+
+permissions:
+  id-token: write  # required for OIDC
+  contents: read
+
+env:
+  AWS_REGION:       ${{ secrets.AWS_REGION }}
+  AWS_ACCOUNT_ID:   ${{ secrets.AWS_ACCOUNT_ID }}
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC — no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push vote image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/voting-app/vote:$IMAGE_TAG \
+            -t $ECR_REGISTRY/voting-app/vote:latest \
+            ./app/vote
+          docker push $ECR_REGISTRY/voting-app/vote:$IMAGE_TAG
+          docker push $ECR_REGISTRY/voting-app/vote:latest
+
+      - name: Build and push result image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/voting-app/result:$IMAGE_TAG \
+            -t $ECR_REGISTRY/voting-app/result:latest \
+            ./app/result
+          docker push $ECR_REGISTRY/voting-app/result:$IMAGE_TAG
+          docker push $ECR_REGISTRY/voting-app/result:latest
+
+      - name: Build and push worker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/voting-app/worker:$IMAGE_TAG \
+            -t $ECR_REGISTRY/voting-app/worker:latest \
+            ./app/worker
+          docker push $ECR_REGISTRY/voting-app/worker:$IMAGE_TAG
+          docker push $ECR_REGISTRY/voting-app/worker:latest
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with: { version: 'v1.33.0' }
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ env.EKS_CLUSTER_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Install Nginx Ingress Controller
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx --create-namespace \
+            --set controller.replicaCount=2 --wait --timeout=5m
+
+      - name: Deploy to EKS
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          sed -i "s|YOUR-ACCOUNT-ID|${{ env.AWS_ACCOUNT_ID }}|g" k8s/*.yaml
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/redis-deployment.yaml
+          kubectl apply -f k8s/db-deployment.yaml
+          kubectl apply -f k8s/worker-deployment.yaml
+          kubectl apply -f k8s/vote-deployment.yaml
+          kubectl apply -f k8s/result-deployment.yaml
+          kubectl apply -f k8s/ingress.yaml
+          kubectl set image deployment/vote   vote=$ECR_REGISTRY/voting-app/vote:$IMAGE_TAG   -n vote
+          kubectl set image deployment/result result=$ECR_REGISTRY/voting-app/result:$IMAGE_TAG -n vote
+          kubectl set image deployment/worker worker=$ECR_REGISTRY/voting-app/worker:$IMAGE_TAG -n vote
+
+      - name: Wait for deployments to be ready
+        run: |
+          kubectl rollout status deployment/vote   -n vote --timeout=5m
+          kubectl rollout status deployment/result -n vote --timeout=5m
+          kubectl rollout status deployment/worker -n vote --timeout=5m
+
+      - name: Print app URL
+        run: |
+          echo '================================================'
+          kubectl wait --for=jsonpath=.status.loadBalancer.ingress \
+            ingress/voting-app-ingress -n vote --timeout=3m || true
+          kubectl get ingress voting-app-ingress -n vote
+          EXTERNAL_IP=$(kubectl get ingress voting-app-ingress -n vote \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo 'pending')
+          echo "Voting page:  http://$EXTERNAL_IP/"
+          echo "Results page: http://$EXTERNAL_IP/result"
+          echo '================================================'

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Voting Results</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Helvetica Neue', sans-serif; background: #1a1a2e; color: #eee; }
+    .container { max-width: 800px; margin: 0 auto; padding: 2rem; }
+    h1 { text-align: center; font-size: 2rem; margin: 2rem 0 0.5rem; color: #4ecca3; }
+    .subtitle { text-align: center; color: #aaa; margin-bottom: 2rem; font-size: 0.9rem; }
+    .results { display: flex; gap: 2rem; margin-top: 2rem; }
+    .result { flex: 1; background: #16213e; border-radius: 12px; padding: 2rem; text-align: center; }
+    .result h2 { font-size: 1.4rem; margin-bottom: 1rem; }
+    .result h2.cats { color: #e94560; }
+    .result h2.dogs { color: #4ecca3; }
+    .percentage { font-size: 4rem; font-weight: bold; margin: 1rem 0; }
+    .bar-wrap { background: rgba(255,255,255,0.1); border-radius: 8px; height: 12px; overflow: hidden; }
+    .bar { height: 100%; border-radius: 8px; transition: width 0.5s ease; }
+    .bar.cats { background: #e94560; }
+    .bar.dogs { background: #4ecca3; }
+    .footer { text-align: center; margin-top: 2rem; color: #aaa; font-size: 0.8rem; }
+    @media (max-width: 700px) { .results { flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Live Results</h1>
+    <p class="subtitle">Updates every 2 seconds</p>
+    <div class="results">
+      <div class="result">
+        <h2 class="cats">🐱 Cats</h2>
+        <div class="percentage" id="cats-pct">--%</div>
+        <div class="bar-wrap"><div class="bar cats" id="cats-bar" style="width:0%"></div></div>
+      </div>
+      <div class="result">
+        <h2 class="dogs">🐶 Dogs</h2>
+        <div class="percentage" id="dogs-pct">--%</div>
+        <div class="bar-wrap"><div class="bar dogs" id="dogs-bar" style="width:0%"></div></div>
+      </div>
+    </div>
+    <p class="footer">Served by the result service</p>
+  </div>
+
+  <script>
+    async function fetchVotes() {
+      try {
+        const res = await fetch('/votes');
+        const data = await res.json();
+        const total = (data.a || 0) + (data.b || 0);
+        const catsP = total > 0 ? Math.round((data.a / total) * 100) : 0;
+        const dogsP = total > 0 ? 100 - catsP : 0;
+        document.getElementById('cats-pct').textContent = catsP + '%';
+        document.getElementById('dogs-pct').textContent = dogsP + '%';
+        document.getElementById('cats-bar').style.width = catsP + '%';
+        document.getElementById('dogs-bar').style.width = dogsP + '%';
+      } catch (e) {
+        console.error('Could not fetch votes:', e);
+      }
+    }
+    fetchVotes();
+    setInterval(fetchVotes, 2000);
+  </script>
+</body>
+</html>
