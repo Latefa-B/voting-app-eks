@@ -1,23 +1,24 @@
 name: Build and Deploy Voting App
 
 on:
-  push: { branches: [main] }
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  id-token: write  # required for OIDC
+  id-token: write
   contents: read
 
 env:
-  AWS_REGION:       ${{ secrets.AWS_REGION }}
-  AWS_ACCOUNT_ID:   ${{ secrets.AWS_ACCOUNT_ID }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
   EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    steps:
 
+    steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -34,63 +35,84 @@ jobs:
       - name: Build and push vote image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG:    ${{ github.sha }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build \
             -t $ECR_REGISTRY/voting-app/vote:$IMAGE_TAG \
             -t $ECR_REGISTRY/voting-app/vote:latest \
             ./app/vote
+
           docker push $ECR_REGISTRY/voting-app/vote:$IMAGE_TAG
           docker push $ECR_REGISTRY/voting-app/vote:latest
 
       - name: Build and push result image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG:    ${{ github.sha }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build \
             -t $ECR_REGISTRY/voting-app/result:$IMAGE_TAG \
             -t $ECR_REGISTRY/voting-app/result:latest \
             ./app/result
+
           docker push $ECR_REGISTRY/voting-app/result:$IMAGE_TAG
           docker push $ECR_REGISTRY/voting-app/result:latest
 
       - name: Build and push worker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG:    ${{ github.sha }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build \
             -t $ECR_REGISTRY/voting-app/worker:$IMAGE_TAG \
             -t $ECR_REGISTRY/voting-app/worker:latest \
             ./app/worker
+
           docker push $ECR_REGISTRY/voting-app/worker:$IMAGE_TAG
           docker push $ECR_REGISTRY/voting-app/worker:latest
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v3
-        with: { version: 'v1.33.0' }
+        with:
+          version: 'v1.33.0'
 
-      - name: Configure kubectl for EKS
+      - name: Configure kubeconfig for EKS
         run: |
           aws eks update-kubeconfig \
-            --name ${{ env.EKS_CLUSTER_NAME }} \
-            --region ${{ env.AWS_REGION }}
+            --name $EKS_CLUSTER_NAME \
+            --region $AWS_REGION
+
+          # 🔥 IMPORTANT FIX: force consistent kubeconfig path for all tools
+          echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
+
+      - name: Verify cluster access
+        run: |
+          kubectl config current-context
+          kubectl get nodes
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
 
       - name: Install Nginx Ingress Controller
+        env:
+          KUBECONFIG: /home/runner/.kube/config
         run: |
           helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
           helm repo update
+
           helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-            --namespace ingress-nginx --create-namespace \
-            --set controller.replicaCount=2 --wait --timeout=5m
+            --namespace ingress-nginx \
+            --create-namespace \
+            --set controller.replicaCount=2 \
+            --wait --timeout=5m
 
       - name: Deploy to EKS
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG:    ${{ github.sha }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           sed -i "s|YOUR-ACCOUNT-ID|${{ env.AWS_ACCOUNT_ID }}|g" k8s/*.yaml
+
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/redis-deployment.yaml
           kubectl apply -f k8s/db-deployment.yaml
@@ -98,24 +120,32 @@ jobs:
           kubectl apply -f k8s/vote-deployment.yaml
           kubectl apply -f k8s/result-deployment.yaml
           kubectl apply -f k8s/ingress.yaml
-          kubectl set image deployment/vote   vote=$ECR_REGISTRY/voting-app/vote:$IMAGE_TAG   -n vote
-          kubectl set image deployment/result result=$ECR_REGISTRY/voting-app/result:$IMAGE_TAG -n vote
-          kubectl set image deployment/worker worker=$ECR_REGISTRY/voting-app/worker:$IMAGE_TAG -n vote
 
-      - name: Wait for deployments to be ready
+          kubectl set image deployment/vote \
+            vote=$ECR_REGISTRY/voting-app/vote:$IMAGE_TAG -n vote
+
+          kubectl set image deployment/result \
+            result=$ECR_REGISTRY/voting-app/result:$IMAGE_TAG -n vote
+
+          kubectl set image deployment/worker \
+            worker=$ECR_REGISTRY/voting-app/worker:$IMAGE_TAG -n vote
+
+      - name: Wait for deployments
         run: |
-          kubectl rollout status deployment/vote   -n vote --timeout=5m
+          kubectl rollout status deployment/vote -n vote --timeout=5m
           kubectl rollout status deployment/result -n vote --timeout=5m
           kubectl rollout status deployment/worker -n vote --timeout=5m
 
       - name: Print app URL
         run: |
-          echo '================================================'
-          kubectl wait --for=jsonpath=.status.loadBalancer.ingress \
-            ingress/voting-app-ingress -n vote --timeout=3m || true
+          echo "================================================"
+
           kubectl get ingress voting-app-ingress -n vote
+
           EXTERNAL_IP=$(kubectl get ingress voting-app-ingress -n vote \
-            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo 'pending')
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+
           echo "Voting page:  http://$EXTERNAL_IP/"
           echo "Results page: http://$EXTERNAL_IP/result"
-          echo '================================================'
+
+          echo "================================================"
