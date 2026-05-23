@@ -9,6 +9,11 @@ permissions:
   id-token: write
   contents: read
 
+# 🔥 FIX #1: Prevent concurrent Helm deployments (THIS fixes your current error)
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -32,57 +37,46 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # ---------------- BUILD IMAGES ----------------
+
       - name: Build and push vote image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build \
-            -t $ECR_REGISTRY/voting-app/vote:$IMAGE_TAG \
-            -t $ECR_REGISTRY/voting-app/vote:latest \
-            ./app/vote
-
+          docker build -t $ECR_REGISTRY/voting-app/vote:$IMAGE_TAG ./app/vote
           docker push $ECR_REGISTRY/voting-app/vote:$IMAGE_TAG
-          docker push $ECR_REGISTRY/voting-app/vote:latest
 
       - name: Build and push result image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build \
-            -t $ECR_REGISTRY/voting-app/result:$IMAGE_TAG \
-            -t $ECR_REGISTRY/voting-app/result:latest \
-            ./app/result
-
+          docker build -t $ECR_REGISTRY/voting-app/result:$IMAGE_TAG ./app/result
           docker push $ECR_REGISTRY/voting-app/result:$IMAGE_TAG
-          docker push $ECR_REGISTRY/voting-app/result:latest
 
       - name: Build and push worker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build \
-            -t $ECR_REGISTRY/voting-app/worker:$IMAGE_TAG \
-            -t $ECR_REGISTRY/voting-app/worker:latest \
-            ./app/worker
-
+          docker build -t $ECR_REGISTRY/voting-app/worker:$IMAGE_TAG ./app/worker
           docker push $ECR_REGISTRY/voting-app/worker:$IMAGE_TAG
-          docker push $ECR_REGISTRY/voting-app/worker:latest
+
+      # ---------------- KUBECTL + AWS ----------------
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v3
         with:
           version: 'v1.33.0'
 
-      - name: Configure kubeconfig for EKS
+      - name: Configure kubeconfig for EKS (FIXED)
         run: |
           aws eks update-kubeconfig \
             --name $EKS_CLUSTER_NAME \
             --region $AWS_REGION
 
-          # 🔥 IMPORTANT FIX: force consistent kubeconfig path for all tools
+          # 🔥 FORCE CONSISTENT CONFIG (IMPORTANT FIX)
           echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
 
       - name: Verify cluster access
@@ -90,10 +84,12 @@ jobs:
           kubectl config current-context
           kubectl get nodes
 
+      # ---------------- HELM (FIXED) ----------------
+
       - name: Install Helm
         uses: azure/setup-helm@v4
 
-      - name: Install Nginx Ingress Controller
+      - name: Install Nginx Ingress Controller (FIXED)
         env:
           KUBECONFIG: /home/runner/.kube/config
         run: |
@@ -104,7 +100,11 @@ jobs:
             --namespace ingress-nginx \
             --create-namespace \
             --set controller.replicaCount=2 \
-            --wait --timeout=5m
+            --wait \
+            --timeout=5m \
+            --atomic   # 🔥 FIX: prevents stuck "operation in progress"
+
+      # ---------------- DEPLOY ----------------
 
       - name: Deploy to EKS
         env:
